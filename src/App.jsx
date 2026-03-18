@@ -92,32 +92,53 @@ function generateMap(floor) {
   placeRandom(CELL_TYPES.EXIT, 1);
   if (Math.random() < 0.5) placeRandom(CELL_TYPES.SHOP, 1);
 
-  // BFS로 (0,0)에서 도달 가능한 모든 셀을 구한 뒤,
-  // 열쇠, 출구, 적, 아이템, 이벤트, 상점이 모두 도달 가능한지 검증
-  const reachable = Array.from({ length: GRID }, () => Array(GRID).fill(false));
-  const bfsQueue = [[0, 0]];
-  reachable[0][0] = true;
-  while (bfsQueue.length > 0) {
-    const [cr, cc] = bfsQueue.shift();
-    for (const [dr, dc] of [[0,1],[0,-1],[1,0],[-1,0]]) {
-      const nr = cr + dr, nc = cc + dc;
-      if (nr >= 0 && nr < GRID && nc >= 0 && nc < GRID && !reachable[nr][nc] && map[nr][nc] !== CELL_TYPES.WALL) {
-        reachable[nr][nc] = true;
-        bfsQueue.push([nr, nc]);
+  // BFS 검증 (2단계)
+  // 1단계: 출구를 벽으로 취급하고 열쇠 + 기타 셀 도달 가능 여부 확인
+  //   (열쇠 없이는 출구를 통과할 수 없으므로, 열쇠는 출구를 거치지 않고 도달 가능해야 함)
+  // 2단계: 전체 BFS로 출구 도달 가능 여부 확인
+  const bfs = (blockType) => {
+    const visited = Array.from({ length: GRID }, () => Array(GRID).fill(false));
+    const q = [[0, 0]];
+    visited[0][0] = true;
+    while (q.length > 0) {
+      const [cr, cc] = q.shift();
+      for (const [dr, dc] of [[0,1],[0,-1],[1,0],[-1,0]]) {
+        const nr = cr + dr, nc = cc + dc;
+        if (nr >= 0 && nr < GRID && nc >= 0 && nc < GRID && !visited[nr][nc]
+            && map[nr][nc] !== CELL_TYPES.WALL && map[nr][nc] !== blockType) {
+          visited[nr][nc] = true;
+          q.push([nr, nc]);
+        }
+      }
+    }
+    return visited;
+  };
+
+  // 1단계: 출구를 막고 BFS → 열쇠 및 기타 셀(적, 아이템, 이벤트, 상점)이 도달 가능해야 함
+  const reachNoExit = bfs(CELL_TYPES.EXIT);
+  let valid = true;
+  for (let r = 0; r < GRID && valid; r++) {
+    for (let c = 0; c < GRID && valid; c++) {
+      const t = map[r][c];
+      if (t !== CELL_TYPES.EMPTY && t !== CELL_TYPES.WALL && t !== CELL_TYPES.EXIT && !reachNoExit[r][c]) {
+        valid = false;
       }
     }
   }
 
-  // 모든 특수 셀이 도달 가능한지 확인
-  let allReachable = true;
-  for (let r = 0; r < GRID && allReachable; r++) {
-    for (let c = 0; c < GRID && allReachable; c++) {
-      if (map[r][c] !== CELL_TYPES.EMPTY && map[r][c] !== CELL_TYPES.WALL && !reachable[r][c]) {
-        allReachable = false;
+  // 2단계: 일반 BFS → 출구도 도달 가능해야 함
+  if (valid) {
+    const reachAll = bfs(null);
+    for (let r = 0; r < GRID && valid; r++) {
+      for (let c = 0; c < GRID && valid; c++) {
+        if (map[r][c] === CELL_TYPES.EXIT && !reachAll[r][c]) {
+          valid = false;
+        }
       }
     }
   }
-  if (!allReachable) {
+
+  if (!valid) {
     return generateMap(floor);
   }
 
@@ -164,10 +185,37 @@ function generateLevelUpChoices() {
 }
 
 // ═══════════════════════════════════════════════════
+// RANKING SYSTEM
+// ═══════════════════════════════════════════════════
+const RANKING_KEY = "cell-dungeon-ranking";
+const MAX_RANKINGS = 10;
+
+function calcScore(floor, level, turn, gold) {
+  // 높은 층 + 높은 레벨 = 높은 점수, 적은 턴 = 보너스
+  return (floor * 1000) + (level * 200) + gold + Math.max(0, 500 - turn);
+}
+
+function getRankings() {
+  try {
+    const data = localStorage.getItem(RANKING_KEY);
+    return data ? JSON.parse(data) : [];
+  } catch { return []; }
+}
+
+function saveRanking(entry) {
+  const rankings = getRankings();
+  rankings.push(entry);
+  rankings.sort((a, b) => b.score - a.score);
+  const top = rankings.slice(0, MAX_RANKINGS);
+  localStorage.setItem(RANKING_KEY, JSON.stringify(top));
+  return top;
+}
+
+// ═══════════════════════════════════════════════════
 // INITIAL STATE
 // ═══════════════════════════════════════════════════
 const initState = () => ({
-  screen: "title", // title | classSelect | game | gameOver
+  screen: "title", // title | classSelect | game | gameOver | ranking
   player: null,
   dungeon: null,
   floor: 1,
@@ -519,6 +567,9 @@ function gameReducer(state, action) {
 
     case "CLOSE_MODAL": {
       if (state.modal?.result === "defeat") {
+        const p = state.player;
+        const score = calcScore(state.floor, p.level, state.turn, p.gold);
+        saveRanking({ name: p.name, class: p.class, level: p.level, floor: state.floor, turn: state.turn, gold: p.gold, score, date: new Date().toLocaleDateString("ko-KR") });
         return { ...initState(), screen: "gameOver", player: state.player, floor: state.floor, turn: state.turn };
       }
       if (state.modal?.result === "victory") {
@@ -681,8 +732,7 @@ function TitleScreen({ dispatch }) {
         <h1 style={{ fontSize: 36, fontWeight: 700, color: colors.accent, margin: "0 0 32px" }}>Cell Dungeon</h1>
         <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 200 }}>
           <button onClick={() => dispatch({ type: "SET_SCREEN", screen: "classSelect" })} style={{ ...S.btn(), padding: "12px 24px", fontSize: 15 }}>1. 새 게임</button>
-          <button style={{ ...S.btnOutline, padding: "12px 24px" }} disabled>2. 이어하기</button>
-          <button style={{ ...S.btnOutline, padding: "12px 24px" }} disabled>3. 랭킹</button>
+          <button onClick={() => dispatch({ type: "SET_SCREEN", screen: "ranking" })} style={{ ...S.btnOutline, padding: "12px 24px" }}>2. 랭킹</button>
         </div>
       </div>
       <div style={{ position: "absolute", bottom: 20, fontSize: 11, color: colors.textSecondary }}>Tony</div>
@@ -732,12 +782,63 @@ function ClassSelect({ dispatch }) {
 }
 
 function GameOverScreen({ state, dispatch }) {
+  const p = state.player;
+  const score = p ? calcScore(state.floor, p.level, state.turn, p.gold) : 0;
   return (
     <div style={{ ...S.app, justifyContent: "center", alignItems: "center" }}>
       <div style={{ textAlign: "center" }}>
         <h1 style={{ fontSize: 28, color: colors.danger, marginBottom: 8 }}>게임 오버</h1>
-        <p style={{ color: colors.textSecondary, marginBottom: 4 }}>{state.player?.name} ({state.player?.class}) - Lv.{state.player?.level}</p>
-        <p style={{ color: colors.textSecondary, marginBottom: 24 }}>{state.floor}층 | {state.turn}턴</p>
+        <p style={{ color: colors.textSecondary, marginBottom: 4 }}>{p?.name} ({p?.class}) - Lv.{p?.level}</p>
+        <p style={{ color: colors.textSecondary, marginBottom: 4 }}>{state.floor}층 | {state.turn}턴 | {p?.gold}G</p>
+        <p style={{ fontSize: 22, fontWeight: 700, color: colors.accent, marginBottom: 24 }}>점수: {score.toLocaleString()}</p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "center" }}>
+          <button onClick={() => dispatch({ type: "SET_SCREEN", screen: "ranking" })} style={{ ...S.btnOutline, padding: "10px 24px" }}>랭킹 보기</button>
+          <button onClick={() => dispatch({ type: "RESET" })} style={S.btn()}>타이틀로 돌아가기</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RankingScreen({ dispatch }) {
+  const rankings = getRankings();
+  const medalColors = ["#FFD700", "#C0C0C0", "#CD7F32"];
+  return (
+    <div style={{ ...S.app, justifyContent: "center", alignItems: "center" }}>
+      <div style={{ textAlign: "center", minWidth: 420 }}>
+        <h1 style={{ fontSize: 24, color: colors.accent, marginBottom: 16 }}>랭킹 Top 10</h1>
+        {rankings.length === 0 ? (
+          <p style={{ color: colors.textSecondary, marginBottom: 24 }}>기록이 없습니다. 게임을 플레이해보세요!</p>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 24, fontSize: 12 }}>
+            <thead>
+              <tr style={{ borderBottom: `2px solid ${colors.border}` }}>
+                <th style={{ padding: "8px 4px", color: colors.textSecondary, textAlign: "center" }}>#</th>
+                <th style={{ padding: "8px 4px", color: colors.textSecondary, textAlign: "left" }}>이름</th>
+                <th style={{ padding: "8px 4px", color: colors.textSecondary, textAlign: "center" }}>직업</th>
+                <th style={{ padding: "8px 4px", color: colors.textSecondary, textAlign: "center" }}>Lv</th>
+                <th style={{ padding: "8px 4px", color: colors.textSecondary, textAlign: "center" }}>층</th>
+                <th style={{ padding: "8px 4px", color: colors.textSecondary, textAlign: "center" }}>턴</th>
+                <th style={{ padding: "8px 4px", color: colors.textSecondary, textAlign: "right" }}>점수</th>
+                <th style={{ padding: "8px 4px", color: colors.textSecondary, textAlign: "right" }}>날짜</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rankings.map((r, i) => (
+                <tr key={i} style={{ borderBottom: `1px solid ${colors.border}`, background: i < 3 ? `${medalColors[i]}11` : "transparent" }}>
+                  <td style={{ padding: "6px 4px", textAlign: "center", fontWeight: 700, color: i < 3 ? medalColors[i] : colors.textSecondary }}>{i < 3 ? ["🥇","🥈","🥉"][i] : i + 1}</td>
+                  <td style={{ padding: "6px 4px", textAlign: "left", color: colors.text }}>{r.name}</td>
+                  <td style={{ padding: "6px 4px", textAlign: "center", color: colors.textSecondary }}>{r.class}</td>
+                  <td style={{ padding: "6px 4px", textAlign: "center", color: colors.text }}>{r.level}</td>
+                  <td style={{ padding: "6px 4px", textAlign: "center", color: colors.text }}>{r.floor}F</td>
+                  <td style={{ padding: "6px 4px", textAlign: "center", color: colors.textSecondary }}>{r.turn}</td>
+                  <td style={{ padding: "6px 4px", textAlign: "right", fontWeight: 700, color: colors.accent }}>{r.score.toLocaleString()}</td>
+                  <td style={{ padding: "6px 4px", textAlign: "right", color: colors.textSecondary, fontSize: 10 }}>{r.date}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
         <button onClick={() => dispatch({ type: "RESET" })} style={S.btn()}>타이틀로 돌아가기</button>
       </div>
     </div>
@@ -1283,6 +1384,7 @@ export default function App() {
   }, []);
 
   if (state.screen === "gameOver") return <GameOverScreen state={state} dispatch={wrappedDispatch} />;
+  if (state.screen === "ranking") return <RankingScreen dispatch={wrappedDispatch} />;
   if (showClassSelect) return <ClassSelect dispatch={wrappedDispatch} />;
   if (state.screen === "game") return <GameScreen state={state} dispatch={wrappedDispatch} />;
   return <TitleScreen dispatch={wrappedDispatch} />;
